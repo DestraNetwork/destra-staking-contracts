@@ -28,6 +28,8 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
 
     mapping(address => Stake[]) public userStakes;
     mapping(uint256 => RewardPeriod) public rewardPeriods;
+    mapping(address => mapping(uint256 => bool)) public hasClaimed; // Tracks if a user claimed rewards for a specific period
+
     uint256 public rewardPeriodIndex; // Current reward period index
 
     uint256 constant LOCKIN_30_DAYS = 30 days;
@@ -155,6 +157,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
 
         require(periodIndex <= rewardPeriodIndex, "Invalid reward period");
         require(block.timestamp >= rewardPeriods[periodIndex].endTime, "Reward period not ended");
+        require(!hasClaimed[msg.sender][periodIndex], "Rewards already claimed for this period");
 
         uint256 userWeight = 0;
         uint256 reward;
@@ -182,6 +185,8 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
         require(reward > 0, "No rewards to claim");
 
         rewardPeriods[periodIndex].ethRewards -= reward;
+
+        hasClaimed[msg.sender][periodIndex] = true;
 
         (bool success, ) = msg.sender.call{value: reward}("");
         require(success, "ETH transfer failed");
