@@ -78,7 +78,7 @@ The constructor:
 1. **`setTotalWeight(uint256 periodIndex, uint256 totalWeight)`**:  
    The owner sets the total weight of stakes for a completed period. Because computing the total weight for thousands of users on-chain could exceed the block gas limit, this calculation is performed off-chain, and the resulting total is then set on-chain. This approach ensures that the contract remains efficient and can scale to a large number of stakers without encountering gas limit issues.
 
-2. **`depositRewards()`**:  
+2. **`depositRewards(uint256 periodIndex)`**:  
    The owner can deposit ETH into the contract. If the current period ended, it transitions to a new period first. Increases `ethRewards` for the active period.
 
 3. **`setEligibilityThreshold(uint256 newThreshold)`**:  
