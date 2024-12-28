@@ -105,6 +105,71 @@ describe("DestraStakingPool", function() {
     });
   });
 
+  describe("Setting Total Weight", function() {
+    beforeEach(async function() {
+      // Alice stakes
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
+      // Owner deposits rewards in period 0
+      await staking.connect(owner).depositRewards(0, { value: REWARD_AMOUNT });
+    });
+
+    it("should allow owner to set total weight if not already set", async function() {
+      await expect(staking.connect(owner).setTotalWeight(0, 1000))
+        .to.emit(staking, "TotalWeightUpdated")
+        .withArgs(0, 1000);
+      const period0 = await staking.rewardPeriods(0);
+      expect(period0.totalWeight).to.equal(1000);
+    });
+
+    it("should revert if invalid period index", async function() {
+      await expect(
+        staking.connect(owner).setTotalWeight(5, 1000)
+      ).to.be.revertedWith("Invalid reward period");
+    });
+  });
+
+  describe("Setting Eligibility Threshold", function() {
+    it("should allow the owner to set a valid eligibility threshold", async function() {
+      const fiveDays = 5 * 24 * 3600;
+      const twentyDays = 20 * 24 * 3600;
+
+      await expect(staking.connect(owner).setEligibilityThreshold(fiveDays))
+        .to.emit(staking, "EligibilityThresholdUpdated")
+        .withArgs(fiveDays);
+
+      expect(await staking.eligibilityThreshold()).to.equal(fiveDays);
+
+      await expect(staking.connect(owner).setEligibilityThreshold(twentyDays))
+        .to.emit(staking, "EligibilityThresholdUpdated")
+        .withArgs(twentyDays);
+
+      expect(await staking.eligibilityThreshold()).to.equal(twentyDays);
+    });
+
+    it("should revert if non-owner tries to set the threshold", async function() {
+      const tenDays = 10 * 24 * 3600;
+      await expect(
+        staking.connect(alice).setEligibilityThreshold(tenDays)
+      ).to.be.revertedWithCustomError(staking, "OwnableUnauthorizedAccount")
+      .withArgs(await alice.getAddress());
+    });
+
+    it("should revert if threshold is below 5 days", async function() {
+      const belowFiveDays = 4 * 24 * 3600;
+      await expect(
+        staking.connect(owner).setEligibilityThreshold(belowFiveDays)
+      ).to.be.revertedWith("Threshold out of range");
+    });
+
+    it("should revert if threshold is above 20 days", async function() {
+      const aboveTwentyDays = 21 * 24 * 3600;
+      await expect(
+        staking.connect(owner).setEligibilityThreshold(aboveTwentyDays)
+      ).to.be.revertedWith("Threshold out of range");
+    });
+  });
+
   describe("Claiming Rewards", function() {
     beforeEach(async function() {
       // Alice stakes for 30 days
@@ -123,6 +188,27 @@ describe("DestraStakingPool", function() {
       await expect(
         staking.connect(alice).claimRewards(0)
       ).to.be.revertedWith("Reward period not ended");
+    });
+
+    it("should revert if invalid reward period is provided", async function() {
+      // Increase time to end period 0
+      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      await expect(
+        staking.connect(alice).claimRewards(5)
+      ).to.be.revertedWith("Invalid reward period");
+    });
+
+    it("should revert if totalWeight is not set yet", async function() {
+      // End current period
+      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      // Attempt to claim without setting totalWeight
+      await expect(
+        staking.connect(alice).claimRewards(0)
+      ).to.be.revertedWith("Reward distribution not started yet");
     });
 
     it("should allow user to claim rewards after owner sets total weight", async function() {
@@ -298,6 +384,60 @@ describe("DestraStakingPool", function() {
 
       const afterBalance = await token.balanceOf(await alice.getAddress());
       expect(afterBalance - beforeBalance).to.equal(STAKE_AMOUNT);
+    });
+
+    it("should apply penalty if unstaked before lockin ends", async function() {
+      // Unstake early
+      const beforeBalance = await token.balanceOf(await alice.getAddress());
+      await staking.connect(alice).unstake(0);
+      const afterBalance = await token.balanceOf(await alice.getAddress());
+
+      // Penalty for 180 days is 12%
+      const penalty = (STAKE_AMOUNT * 12n) / 100n;
+      const expectedReturned = STAKE_AMOUNT - penalty;
+      expect(afterBalance - beforeBalance).to.equal(expectedReturned);
+    });
+
+    it("should revert if invalid stake index", async function() {
+      await expect(
+        staking.connect(alice).unstake(5)
+      ).to.be.revertedWith("Invalid stake index");
+    });
+
+    it("should revert if stake already withdrawn", async function() {
+      await staking.connect(alice).unstake(0);
+      await expect(
+        staking.connect(alice).unstake(0)
+      ).to.be.revertedWith("Already withdrawn");
+    });
+  });
+
+  describe("Edge Cases & Additional Checks", function() {
+    it("should handle multiple reward period transitions", async function() {
+      // Move through multiple periods
+      for (let i = 0; i < 3; i++) {
+        await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
+        await ethers.provider.send("evm_mine", []);
+        await staking.connect(owner).depositRewards(0, { value: REWARD_AMOUNT });
+      }
+
+      const currentIndex = await staking.rewardPeriodIndex();
+      expect(currentIndex).to.equal(3);
+    });
+
+    it("should revert if owner tries to deposit 0 ETH", async function() {
+      await expect(staking.connect(owner).depositRewards(0))
+        .to.be.revertedWith("No ETH deposited");
+    });
+
+    it("should revert if user tries to claim non-existing period", async function() {
+      await expect(staking.connect(alice).claimRewards(10))
+        .to.be.revertedWith("Invalid reward period");
+    });
+
+    it("getUserStakes should return empty if user has no stakes", async function() {
+      const stakes = await staking.getUserStakes(await bob.getAddress());
+      expect(stakes.length).to.equal(0);
     });
   });
 });
