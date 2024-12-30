@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -9,12 +9,12 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 contract DestraStakingPool is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    IERC20 public dsyncToken;
-
+    IERC20 public immutable dsyncToken;
     struct Stake {
         uint256 amount;            // Amount of tokens staked
         uint256 lockinPeriod;      // Lock-in duration in seconds
         uint256 startTime;         // Timestamp when staking started
+        uint256 eligibilityThresholdAtStake; // Snapshot of eligibility threshold at the time of staking
         bool withdrawn;            // Flag indicating if stake has been withdrawn
         uint256 rewardPeriodIndex; // The reward period in which this stake was made
     }
@@ -46,8 +46,8 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     // Events
     event Staked(address indexed user, uint256 amount, uint256 lockinPeriod);
     event Unstaked(address indexed user, uint256 amount, uint256 penalty);
-    event RewardDeposited(uint256 amount);
-    event RewardClaimed(address indexed user, uint256 reward);
+    event RewardDeposited(uint256 periodIndex, uint256 amount);
+    event RewardClaimed(address indexed user, uint256 periodIndex, uint256 reward);
     event TotalWeightUpdated(uint256 rewardPeriodIndex, uint256 totalWeight);
     event RewardPeriodTransition(
         uint256 oldPeriodIndex,
@@ -58,6 +58,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     event EligibilityThresholdUpdated(uint256 newThreshold);
 
     constructor(address _dsyncToken) Ownable(msg.sender) {
+        require(_dsyncToken != address(0), "Invalid token address");
         dsyncToken = IERC20(_dsyncToken);
         rewardPeriods[0] = RewardPeriod({
             ethRewards: 0,
@@ -93,18 +94,32 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     /// @dev Allows the owner to set the total weight for a reward period.
     /// @param periodIndex The index of the reward period to update.
     /// @param totalWeight The calculated total weight for the specified reward period.
+    /// @notice Calculating total weight manually is necessary because iterating over all stakes 
+    ///         to compute the total weight within this function could exceed the block gas limit. 
+    ///         As the number of stakes grows, gas costs for looping over all stakes would become 
+    ///         prohibitively high, making the operation infeasible to execute on-chain. 
+    ///         By calculating this off-chain and setting it here, the contract remains scalable.
     function setTotalWeight(uint256 periodIndex, uint256 totalWeight) external onlyOwner {
         require(periodIndex <= rewardPeriodIndex, "Invalid reward period");
+        require(rewardPeriods[periodIndex].totalWeight == 0, "Total weight already set");
+        require(rewardPeriods[periodIndex].ethRewards > 0, "No ETH for period");
+        _checkAndTransitionRewardPeriod();
         rewardPeriods[periodIndex].totalWeight = totalWeight;
         emit TotalWeightUpdated(periodIndex, totalWeight);
     }
 
-    /// @dev Allows the owner to deposit ETH rewards for the current reward period.
-    function depositRewards() external payable onlyOwner {
+    /// @dev Allows the owner to deposit ETH rewards for a specific reward period.
+    /// @param periodIndex The index of the reward period to deposit rewards to.
+    function depositRewards(uint256 periodIndex) external payable onlyOwner {
         require(msg.value > 0, "No ETH deposited");
+        // Allow deposits for past periods if totalWeight is not set
+        require(
+            periodIndex <= rewardPeriodIndex || rewardPeriods[periodIndex].totalWeight == 0,
+            "Invalid reward period"
+        );
         _checkAndTransitionRewardPeriod(); // Automatically transition to new period
-        rewardPeriods[rewardPeriodIndex].ethRewards += msg.value;
-        emit RewardDeposited(msg.value);
+        rewardPeriods[periodIndex].ethRewards += msg.value;
+        emit RewardDeposited(periodIndex, msg.value);
     }
 
     /// @dev Allows a user to stake tokens for a specified lock-in period.
@@ -127,6 +142,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
             amount: amount,
             lockinPeriod: lockinPeriod,
             startTime: block.timestamp,
+            eligibilityThresholdAtStake: eligibilityThreshold,
             withdrawn: false,
             rewardPeriodIndex: rewardPeriodIndex // Assign current reward period index
         }));
@@ -141,10 +157,10 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     ///      1. Users can claim rewards for a completed reward period (periodIndex).
     ///      2. The user's stake must have:
     ///          - Not been withdrawn.
-    ///          - Started at least `eligibilityThreshold` days before the period ended 
-    ///            (stakeData.startTime + eligibilityThreshold <= rewardPeriods[periodIndex].endTime).
+    ///          - Started at least `stakeData.eligibilityThresholdAtStake` days before the period ended 
+    ///            (stakeData.startTime + stakeData.eligibilityThresholdAtStake <= rewardPeriods[periodIndex].endTime).
     ///          - The stake must also span through the end of the reward period 
-    ///            (stakeData.startTime + stakeData.lockinPeriod >= rewardPeriods[periodIndex].endTime).
+    ///            (stakeData.startTime + stakeData.lockinPeriod + stakeData.eligibilityThresholdAtStake >= rewardPeriods[periodIndex].endTime).
     ///      3. Based on the stake’s lock-in period, a multiplier is applied:
     ///         - 30 days: multiplier = 1
     ///         - 90 days: multiplier = 2
@@ -157,16 +173,18 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
 
         require(periodIndex <= rewardPeriodIndex, "Invalid reward period");
         require(block.timestamp >= rewardPeriods[periodIndex].endTime, "Reward period not ended");
-        require(!hasClaimed[msg.sender][periodIndex], "Rewards already claimed for this period");
+        require(!hasClaimed[msg.sender][periodIndex], "Rewards claimed for this period");
 
         uint256 userWeight = 0;
         uint256 reward;
-        for (uint256 i = 0; i < userStakes[msg.sender].length; i++) {
+
+        uint256 stakesLength = userStakes[msg.sender].length;
+        for (uint256 i = 0; i < stakesLength; i++) {
             Stake storage stakeData = userStakes[msg.sender][i];
             if (
                 !stakeData.withdrawn &&
-                stakeData.startTime + eligibilityThreshold <= rewardPeriods[periodIndex].endTime &&
-                stakeData.startTime + stakeData.lockinPeriod >= rewardPeriods[periodIndex].endTime
+                stakeData.startTime + stakeData.eligibilityThresholdAtStake <= rewardPeriods[periodIndex].endTime &&
+                stakeData.startTime + stakeData.lockinPeriod + stakeData.eligibilityThresholdAtStake > rewardPeriods[periodIndex].endTime
             ) {
                 uint256 multiplier = stakeData.lockinPeriod == LOCKIN_30_DAYS ? 1 :
                                      stakeData.lockinPeriod == LOCKIN_90_DAYS ? 2 :
@@ -184,14 +202,17 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
         reward = (rewardPeriods[periodIndex].ethRewards * userWeight) / totalWeight;
         require(reward > 0, "No rewards to claim");
 
-        rewardPeriods[periodIndex].ethRewards -= reward;
+        // Update the reward period data
+        rewardPeriods[periodIndex].ethRewards -= reward; // Deduct the claimed reward
+        rewardPeriods[periodIndex].totalWeight -= userWeight; // Deduct the user's weight from total weight
 
+        // Mark rewards as claimed
         hasClaimed[msg.sender][periodIndex] = true;
 
         (bool success, ) = msg.sender.call{value: reward}("");
         require(success, "ETH transfer failed");
 
-        emit RewardClaimed(msg.sender, reward);
+        emit RewardClaimed(msg.sender, periodIndex, reward);
     }
 
     /// @dev Allows a user to unstake tokens with a penalty if unstaked before completion.
@@ -203,15 +224,16 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
         require(!stakeData.withdrawn, "Already withdrawn");
 
         uint256 penalty;
+        uint256 stakedAmount = stakeData.amount;
         if (block.timestamp < stakeData.startTime + stakeData.lockinPeriod) {
             penalty = (stakeData.lockinPeriod == LOCKIN_30_DAYS) ? 15 :
                       (stakeData.lockinPeriod == LOCKIN_90_DAYS) ? 13 :
                       (stakeData.lockinPeriod == LOCKIN_180_DAYS) ? 12 : 10;
-            penalty = (stakeData.amount * penalty) / 100;
+            penalty = (stakedAmount * penalty) / 100;
         }
 
-        uint256 amountToTransfer = stakeData.amount - penalty;
-        totalStaked -= stakeData.amount;
+        uint256 amountToTransfer = stakedAmount - penalty;
+        totalStaked -= stakedAmount;
         stakeData.withdrawn = true;
 
         if (penalty > 0) {
@@ -220,7 +242,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
 
         dsyncToken.safeTransfer(msg.sender, amountToTransfer);
 
-        emit Unstaked(msg.sender, stakeData.amount, penalty);
+        emit Unstaked(msg.sender, stakedAmount, penalty);
     }
 
     /// @dev Returns all stakes for a user.
@@ -232,7 +254,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     ///      This threshold must be between 5 days and 20 days.
     /// @param newThreshold The new threshold in seconds.
     function setEligibilityThreshold(uint256 newThreshold) external onlyOwner {
-        require(newThreshold >= 5 days && newThreshold <= 20 days, "Threshold must be between 5 and 20 days");
+        require(newThreshold >= 5 days && newThreshold <= 20 days, "Threshold out of range");
         eligibilityThreshold = newThreshold;
         emit EligibilityThresholdUpdated(newThreshold);
     }

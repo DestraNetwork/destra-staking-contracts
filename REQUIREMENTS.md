@@ -95,7 +95,7 @@ The contract supports these lock-in periods and their associated multipliers:
    - Eligibility for rewards:
      - Stake must not be withdrawn.
      - Stake must have started at least 15 days before the period ended.
-     - The stake’s lock-in period must cover the period’s end time.
+     - The stake’s lock-in period + 15 days must cover the period’s end time.
    - Each eligible stake’s weight = `stakeAmount * multiplier`.
    - User’s total weight = sum of all eligible stakes’ weights.
    - User’s reward = `(userWeight / totalWeight) * ethRewards`.
