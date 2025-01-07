@@ -153,6 +153,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     }
 
     /// @dev Allows a user to claim their rewards after the reward period.
+    /// @param periodIndex The reward period index for which rewards are to be claimed.
     ///      Rewards Calculation Logic:
     ///      1. Users can claim rewards for a completed reward period (periodIndex).
     ///      2. The user's stake must have:
