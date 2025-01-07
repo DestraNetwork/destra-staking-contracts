@@ -246,6 +246,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     }
 
     /// @dev Returns all stakes for a user.
+    /// @param user The address of the user whose stakes are being queried.
     function getUserStakes(address user) external view returns (Stake[] memory) {
         return userStakes[user];
     }
