@@ -30,7 +30,7 @@ describe("DestraStakingPool", function() {
     staking = await Staking.deploy(await token.getAddress());
     await staking.waitForDeployment();
 
-    // Give Alice and Bob some tokens
+    // Give Alice, Bob, and Charlie some tokens
     await token.transfer(await alice.getAddress(), ethers.parseEther("2000"));
     await token.transfer(await bob.getAddress(), ethers.parseEther("2000"));
     await token.transfer(await charlie.getAddress(), ethers.parseEther("2000"));
@@ -39,8 +39,9 @@ describe("DestraStakingPool", function() {
   describe("Initialization", function() {
     it("should initialize correctly", async function() {
       const period0 = await staking.rewardPeriods(0);
-      expect(period0.totalWeight).to.equal(0);
       expect(period0.ethRewards).to.equal(0);
+      expect(period0.startTime).to.be.gt(0);
+      expect(period0.endTime).to.be.gt(period0.startTime);
       expect(await staking.rewardPeriodIndex()).to.equal(0);
     });
   });
@@ -64,7 +65,8 @@ describe("DestraStakingPool", function() {
       ).to.be.revertedWith("Invalid lock-in period");
     });
 
-    it("should revert if transfer fails", async function() {
+    it("should revert if transfer fails (no approve)", async function() {
+      // Alice has tokens but hasn't approved => revert
       await expect(
         staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS)
       ).to.be.reverted;
@@ -102,30 +104,6 @@ describe("DestraStakingPool", function() {
       expect(currentIndex).to.equal(1);
       const period1 = await staking.rewardPeriods(1);
       expect(period1.ethRewards).to.equal(REWARD_AMOUNT);
-    });
-  });
-
-  describe("Setting Total Weight", function() {
-    beforeEach(async function() {
-      // Alice stakes
-      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
-      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
-      // Owner deposits rewards in period 0
-      await staking.connect(owner).depositRewards(0, { value: REWARD_AMOUNT });
-    });
-
-    it("should allow owner to set total weight if not already set", async function() {
-      await expect(staking.connect(owner).setTotalWeight(0, 1000))
-        .to.emit(staking, "TotalWeightUpdated")
-        .withArgs(0, 1000);
-      const period0 = await staking.rewardPeriods(0);
-      expect(period0.totalWeight).to.equal(1000);
-    });
-
-    it("should revert if invalid period index", async function() {
-      await expect(
-        staking.connect(owner).setTotalWeight(5, 1000)
-      ).to.be.revertedWith("Invalid reward period");
     });
   });
 
@@ -200,52 +178,15 @@ describe("DestraStakingPool", function() {
       ).to.be.revertedWith("Invalid reward period");
     });
 
-    it("should revert if totalWeight is not set yet", async function() {
-      // End current period
-      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
-      await ethers.provider.send("evm_mine", []);
-
-      // Attempt to claim without setting totalWeight
-      await expect(
-        staking.connect(alice).claimRewards(0)
-      ).to.be.revertedWith("Reward distribution not started yet");
-    });
-
-    it("should allow user to claim rewards after owner sets total weight", async function() {
-      // Fast forward to end the period
-      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
-      await ethers.provider.send("evm_mine", []);
-
-      // Suppose owner calculated totalWeight:
-      await staking.connect(owner).setTotalWeight(0, ethers.parseEther("3000"));
-
-      const beforeBalance = await ethers.provider.getBalance(await alice.getAddress());
-      const tx = await staking.connect(alice).claimRewards(0);
-      const receipt = await tx.wait();
-      
-      // Calculate gas used
-      const gasUsed = receipt!.gasUsed * receipt!.gasPrice!;
-      
-      const afterBalance = await ethers.provider.getBalance(await alice.getAddress());
-      // Alice weight = 1000/3000 = 1/3 * REWARD_AMOUNT = ~3.3333 ETH
-      // Add back gas costs to get actual reward amount
-      const actualReward = (afterBalance - beforeBalance) + gasUsed;
-      expect(actualReward).to.be.closeTo(REWARD_AMOUNT * 1n / 3n, ethers.parseEther("0.0001"));
-    });
-
     it("should revert if no eligible stakes", async function() {
-      // Bob unstakes before the period ends so he has no eligible stakes
-      await ethers.provider.send("evm_increaseTime", [15 * 24 * 3600 + 1]); // Past 15 days check
+      // Bob unstakes early -> won't have an eligible stake for period 0
+      await ethers.provider.send("evm_increaseTime", [15 * 24 * 3600 + 1]); // 15 days passes
       await ethers.provider.send("evm_mine", []);
-
-      // Bob unstakes early from his 90 days stake
       await staking.connect(bob).unstake(0);
 
-      // End period
-      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS]); 
+      // Fast forward to end
+      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS]);
       await ethers.provider.send("evm_mine", []);
-
-      await staking.connect(owner).setTotalWeight(0, 1000); // Only alice has weight now
 
       await expect(
         staking.connect(bob).claimRewards(0)
@@ -257,28 +198,21 @@ describe("DestraStakingPool", function() {
       await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
       await ethers.provider.send("evm_mine", []);
 
-      // Suppose owner calculated totalWeight:
-      await staking.connect(owner).setTotalWeight(0, ethers.parseEther("3000"));
+      // totalWeights is automatically updated:
+      // Alice => 1000 tokens * multiplier=1 => weight=1000
+      // Bob   => 1000 tokens * multiplier=2 => weight=2000 => total=3000
 
-      const beforeBalance = await ethers.provider.getBalance(await alice.getAddress());
-      const tx = await staking.connect(alice).claimRewards(0);
-      const receipt = await tx.wait();
-      
-      // Calculate gas used
-      const gasUsed = receipt!.gasUsed * receipt!.gasPrice!;
-      
-      const afterBalance = await ethers.provider.getBalance(await alice.getAddress());
-      // Alice weight = 1000/3000 = 1/3 * REWARD_AMOUNT = ~3.3333 ETH
-      // Add back gas costs to get actual reward amount
-      const actualReward = (afterBalance - beforeBalance) + gasUsed;
-      expect(actualReward).to.be.closeTo(REWARD_AMOUNT * 1n / 3n, ethers.parseEther("0.0001"));
+      // Claim once
+      await staking.connect(alice).claimRewards(0);
+
+      // Claim again
       await expect(
         staking.connect(alice).claimRewards(0)
       ).to.be.revertedWith("Rewards claimed for this period");
     });
 
     it("should allow user to claim rewards in the next cycle when eligibility threshold exceeds current reward period end time", async function () {
-      // Fast forward close to the end of the first reward period
+      // Move close to the end of the first reward period
       await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS - 9 * 24 * 3600]);
       await ethers.provider.send("evm_mine", []);
     
@@ -286,83 +220,74 @@ describe("DestraStakingPool", function() {
       await token.connect(charlie).approve(await staking.getAddress(), STAKE_AMOUNT);
       await staking.connect(charlie).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
     
-      await ethers.provider.send("evm_increaseTime", [10 * 24 * 3600]); // 10 more days passed
+      // 10 more days pass (now total 30 days)
+      await ethers.provider.send("evm_increaseTime", [10 * 24 * 3600]);
       await ethers.provider.send("evm_mine", []);
-      
-      // Suppose owner calculates totalWeight for first reward period
-      await staking.connect(owner).setTotalWeight(0, ethers.parseEther("3000"));
     
-      // Ensure Charlie cannot claim rewards for period 0 because eligibility threshold is not met
+      // Claiming for period 0:
+      // Charlie started ~9 days before period end => threshold=15 days => not eligible
       await expect(staking.connect(charlie).claimRewards(0)).to.be.revertedWith("No eligible stakes for rewards");
     
-      // Transition to the next reward period
+      // deposit some ETH in period 1
+      await staking.connect(owner).depositRewards(1, { value: REWARD_AMOUNT });
+    
+      // Fast forward entire 30 days of period 1
       await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS]);
       await ethers.provider.send("evm_mine", []);
     
-      await staking.connect(owner).depositRewards(1, { value: REWARD_AMOUNT });
-      // Suppose owner calculates totalWeight for period 1
-      await staking.connect(owner).setTotalWeight(1, ethers.parseEther("3000"));
-    
-      // Charlie claims rewards for period 1
+      // Now Charlie can claim for period 1
       const beforeBalance = await ethers.provider.getBalance(await charlie.getAddress());
       const tx = await staking.connect(charlie).claimRewards(1);
       const receipt = await tx.wait();
-    
-      // Calculate gas used
+
       const gasUsed = receipt!.gasUsed * receipt!.gasPrice!;
-    
       const afterBalance = await ethers.provider.getBalance(await charlie.getAddress());
-      // Charlie's weight = 1000 / 3000 = 1/3 * REWARD_AMOUNT
+      const actualReward = afterBalance - beforeBalance + gasUsed;
+      // Alice's stakes in period 1 = 0 
+      // Bob's weight in period 1 = 1000 * 2(muliplier for 90 days) = 2000
+      // Charlie's weight in period 1 = 1000 * 1 = 1000
+      // Total Weight in period 1 = 3000
+      // Charlie's rewards = 1000 / 3000 = 1/3 * REWARD_AMOUNT
       const expectedReward = REWARD_AMOUNT * 1n / 3n;
-    
-      // Check that Charlie's balance increased by the expected reward minus gas
-      const actualReward = (afterBalance - beforeBalance) + gasUsed;
+
+
       expect(actualReward).to.be.closeTo(expectedReward, ethers.parseEther("0.0001"));
     });
-    
+
     it("should correctly calculate rewards for users with different lock-in periods", async function () {
-      // Fast forward to the end of the reward period
+      // End the current period
       await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
       await ethers.provider.send("evm_mine", []);
     
-      // Suppose owner calculates totalWeight for period 0:
       // Alice: 1000 tokens * multiplier 1 = 1000 weight
       // Bob: 1000 tokens * multiplier 2 = 2000 weight
       // Total weight = 3000
-      await staking.connect(owner).setTotalWeight(0, ethers.parseEther("3000"));
-    
-      // Alice claims rewards first
-      const aliceInitialBalance = await ethers.provider.getBalance(await alice.getAddress());
-      const aliceTx = await staking.connect(alice).claimRewards(0);
-      const aliceReceipt = await aliceTx.wait();
-    
-      // Alice's reward = (1000 / 3000) * REWARD_AMOUNT
-      const aliceExpectedReward = (REWARD_AMOUNT * 1000n) / 3000n;
-    
-      // Calculate gas used
-      const aliceGasUsed = aliceReceipt!.gasUsed * aliceReceipt!.gasPrice;
-      const aliceFinalBalance = await ethers.provider.getBalance(await alice.getAddress());
-      const aliceActualReward = aliceFinalBalance - aliceInitialBalance + aliceGasUsed;
-    
-      expect(aliceActualReward).to.be.closeTo(aliceExpectedReward, ethers.parseEther("0.0001"));
-    
-      // Bob claims rewards after Alice
-      const bobInitialBalance = await ethers.provider.getBalance(await bob.getAddress());
-      const bobTx = await staking.connect(bob).claimRewards(0);
-      const bobReceipt = await bobTx.wait();
-    
-      // After Alice's claim, remaining totalWeight = 2000 (Bob's weight)
-      // Bob's reward = (2000 / 2000) * remaining rewards = remaining rewards
-      const bobExpectedReward = REWARD_AMOUNT - aliceExpectedReward;
-    
-      // Calculate gas used
-      const bobGasUsed = bobReceipt!.gasUsed * bobReceipt!.gasPrice;
-      const bobFinalBalance = await ethers.provider.getBalance(await bob.getAddress());
-      const bobActualReward = bobFinalBalance - bobInitialBalance + bobGasUsed;
-    
-      expect(bobActualReward).to.be.closeTo(bobExpectedReward, ethers.parseEther("0.0001"));
+
+      // Alice claims first
+      const aliceBefore = await ethers.provider.getBalance(await alice.getAddress());
+      const txA = await staking.connect(alice).claimRewards(0);
+      const receiptA = await txA.wait();
+
+      const gasUsedA = receiptA!.gasUsed * receiptA!.gasPrice!;
+      const aliceAfter = await ethers.provider.getBalance(await alice.getAddress());
+      const aliceActual = aliceAfter - aliceBefore + gasUsedA;
+      const aliceExpected = REWARD_AMOUNT * 1n / 3n; // ~3.3333
+
+      expect(aliceActual).to.be.closeTo(aliceExpected, ethers.parseEther("0.0001"));
+
+      // Now Bob claims. The contract subtracts 1000 weight from totalWeight => left=2000
+      // So Bob gets full remainder => 6.666...
+      const bobBefore = await ethers.provider.getBalance(await bob.getAddress());
+      const txB = await staking.connect(bob).claimRewards(0);
+      const receiptB = await txB.wait();
+
+      const gasUsedB = receiptB!.gasUsed * receiptB!.gasPrice!;
+      const bobAfter = await ethers.provider.getBalance(await bob.getAddress());
+      const bobActual = bobAfter - bobBefore + gasUsedB;
+      const bobExpected = REWARD_AMOUNT - aliceExpected;
+
+      expect(bobActual).to.be.closeTo(bobExpected, ethers.parseEther("0.0001"));
     });
-    
   });
 
   describe("Unstaking", function() {
@@ -418,7 +343,8 @@ describe("DestraStakingPool", function() {
       for (let i = 0; i < 3; i++) {
         await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
         await ethers.provider.send("evm_mine", []);
-        await staking.connect(owner).depositRewards(0, { value: REWARD_AMOUNT });
+        // deposit in the newly created period
+        await staking.connect(owner).depositRewards(i + 1, { value: REWARD_AMOUNT });
       }
 
       const currentIndex = await staking.rewardPeriodIndex();
@@ -439,5 +365,84 @@ describe("DestraStakingPool", function() {
       const stakes = await staking.getUserStakes(await bob.getAddress());
       expect(stakes.length).to.equal(0);
     });
+  
+    it("should correctly calculate weights for overlapping stakes", async function () {
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT * 2n);
+
+      // Alice stakes twice
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_90_DAYS);
+
+      const totalWeight = await staking.totalWeights(0);
+      // Weight: 1000 (30 days) + 2000 (90 days multiplier)
+      expect(totalWeight).to.equal(STAKE_AMOUNT + STAKE_AMOUNT * 2n); // 1000n + 2000n
+    });
+
+    it("should revert unstaking with invalid index", async function () {
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
+
+      await expect(staking.connect(alice).unstake(1)).to.be.revertedWith("Invalid stake index");
+    });
+
+    it("should calculate total weights correctly after multiple reward periods", async function () {
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_90_DAYS);
+
+      await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      // Transition to a new period
+      await staking.connect(owner).depositRewards(1, { value: REWARD_AMOUNT });
+
+      const totalWeightPeriod0 = await staking.totalWeights(0);
+      const totalWeightPeriod1 = await staking.totalWeights(1);
+
+      // Weight in period 1 should match as the stake spans through it
+      expect(totalWeightPeriod1).to.equal(totalWeightPeriod0);
+    });
+
+    it("should allow smallest valid stake amount", async function () {
+      const smallAmount = ethers.parseEther("0.0001");
+
+      await token.connect(alice).approve(await staking.getAddress(), smallAmount);
+      await expect(staking.connect(alice).stake(smallAmount, LOCKIN_30_DAYS)).to.emit(staking, "Staked");
+
+      const userStakes = await staking.getUserStakes(await alice.getAddress());
+      expect(userStakes[0].amount).to.equal(smallAmount);
+    });
+
+    it("should correctly transition reward periods multiple times", async function () {
+      // Advance through 3 reward periods
+      for (let i = 0; i < 3; i++) {
+        await ethers.provider.send("evm_increaseTime", [LOCKIN_30_DAYS + 1]);
+        await ethers.provider.send("evm_mine", []);
+        await staking.connect(owner).depositRewards(i + 1, { value: REWARD_AMOUNT });
+      }
+
+      const currentPeriodIndex = await staking.rewardPeriodIndex();
+      expect(currentPeriodIndex).to.equal(3);
+    });
+
+    it("should handle eligibility threshold correctly during staking", async function () {
+      const newThreshold = 10 * 24 * 3600; // 10 days
+      await staking.connect(owner).setEligibilityThreshold(newThreshold);
+
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
+
+      const stakeData = await staking.getUserStakes(await alice.getAddress());
+      expect(stakeData[0].eligibilityThresholdAtStake).to.equal(newThreshold);
+    });
+
+    it("should revert if unstaking already withdrawn stake", async function () {
+      await token.connect(alice).approve(await staking.getAddress(), STAKE_AMOUNT);
+      await staking.connect(alice).stake(STAKE_AMOUNT, LOCKIN_30_DAYS);
+
+      await staking.connect(alice).unstake(0);
+
+      await expect(staking.connect(alice).unstake(0)).to.be.revertedWith("Already withdrawn");
+    });
   });
+
 });
