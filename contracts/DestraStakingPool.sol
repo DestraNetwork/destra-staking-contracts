@@ -141,7 +141,7 @@ contract DestraStakingPool is Ownable, ReentrancyGuard {
     /// @dev Allows the owner to deposit ETH rewards for the current reward period.
     /// @param periodIndex The index of the current reward period to deposit rewards.
     ///        This parameter explicitly ensures that the deposit is made into the correct
-    ///        reward period, avoiding accidental deposits wrong period.
+    ///        reward period, avoiding accidental deposits in wrong period.
     function depositRewards(uint256 periodIndex) external payable onlyOwner {
         _checkAndTransitionRewardPeriod(); // Automatically transition to new period 
         require(msg.value > 0, "No ETH deposited");
