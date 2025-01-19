@@ -16,7 +16,7 @@ This document details the functional requirements of the **DestraStakingPool** s
 
 - **Owner:** The contract’s deployer or assigned owner who can:
   - Deposit ETH rewards.
-  - Set total staking weight for a completed reward period.
+  - Set the eligibility threshold.
 - **User/Staker:** Any address that stakes tokens to earn rewards.
 
 ## Lock-In Periods and Multipliers
@@ -33,9 +33,8 @@ The contract supports these lock-in periods and their associated multipliers:
 - Each reward period has:
   - A start and end time.
   - A pool of ETH rewards.
-  - A total weight (calculated off-chain and set by the owner).
-- When one period ends and a new one begins, the contract automatically transitions to the new reward period.
-- Users can claim rewards only after a reward period has ended and once its total weight is set.
+- Reward periods transition automatically when the current period ends.
+- Total weights for reward periods are dynamically calculated on-chain during staking and unstaking.
 
 ## Functional Requirements
 
@@ -85,13 +84,8 @@ The contract supports these lock-in periods and their associated multipliers:
    - The ETH amount is added to the current reward period’s `ethRewards`.
    - `RewardDeposited` event is emitted.
 
-8. **Set Total Weight (Owner Only):**
-   - After a reward period ends, the owner must set the `totalWeight` for that period using `setTotalWeight(periodIndex, totalWeight)`.
-   - This total weight is computed off-chain.
-   - `TotalWeightUpdated` event is emitted.
-
 9. **Claiming Rewards:**
-   - Once a reward period ends and its total weight is set, users can call `claimRewards(periodIndex)` to receive their share of ETH.
+   - Users can call `claimRewards(periodIndex)` to receive their share of ETH for a completed reward period.
    - Eligibility for rewards:
      - Stake must not be withdrawn.
      - Stake must have started at least 15 days before the period ended.
@@ -104,7 +98,7 @@ The contract supports these lock-in periods and their associated multipliers:
 
 ### Period Transitions
 
-10. **Period Transition:**
+10. **Automatic Period Transition:**
     - If the current reward period has ended, calling `stake`, `claimRewards`, or `depositRewards` triggers automatic creation of a new period.
     - The `RewardPeriodTransition` event is emitted with details of the old and new periods.
 
@@ -121,7 +115,7 @@ The contract supports these lock-in periods and their associated multipliers:
 13. **Validation:**
     - Check for valid lock-in periods on `stake`.
     - Ensure rewards are claimed only after period end.
-    - Ensure total weight is set before distributing rewards.
+    - Ensure total weight adjustments are dynamic and accurate during stake and unstake operations.
     - Prevent unstake operations on non-existent or already withdrawn stakes.
     - Disallow zero ETH deposit by owner.
 
@@ -131,9 +125,9 @@ The contract supports these lock-in periods and their associated multipliers:
 - **Unstaked:** Emitted when a user unstakes tokens.
 - **RewardDeposited:** Emitted when the owner deposits ETH rewards.
 - **RewardClaimed:** Emitted when a user successfully claims their reward.
-- **TotalWeightUpdated:** Emitted when the owner sets the total weight for a period.
+- **TotalWeightUpdated:** Emitted when the total weights for reward periods are adjusted.
 - **RewardPeriodTransition:** Emitted upon automatic transition to a new reward period.
 
 ## Summary
 
-The **DestraStakingPool** contract provides a mechanism for users to stake tokens and earn ETH rewards proportional to their staking weight. The owner sets the total weight off-chain to handle large numbers of stakers efficiently and avoid possibility of exhausting block gas limit on-chain for large number of stakers. Early unstaking incurs penalties, ensuring that users committing for longer durations benefit from greater multipliers and fair reward distribution.
+The **DestraStakingPool** contract provides a mechanism for users to stake tokens and earn ETH rewards proportional to their staking weight. Dynamic weight management ensures efficient reward distribution, while configurable eligibility thresholds enhance flexibility. Early unstaking incurs penalties, ensuring fairness for long-term stakers.
